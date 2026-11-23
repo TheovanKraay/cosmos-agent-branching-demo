@@ -48,8 +48,8 @@ jobs:
           echo "::add-mask::$M2_SDK_KEY"
           export M2_SDK_KEY
           echo "### Three workers, $SWARM_RECORDS orders per worker" >> "$GITHUB_STEP_SUMMARY"
-          echo '|Mode|Seed writes|Ready s|Verified s|Cleanup finished s|SDK ops/s|Min available RAM MiB|Min free disk MiB|' >> "$GITHUB_STEP_SUMMARY"
-          echo '|---|---:|---:|---:|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
+          rows="$RUNNER_TEMP/verified-runs.jsonl"
+          : > "$rows"
           for arm in fresh overlay overlay fresh; do
             samples="$RUNNER_TEMP/capacity.tsv"
             (while :; do
@@ -74,7 +74,33 @@ jobs:
           with open(path) as f: r = json.load(f)
           if (r["mode"], r["fixture_records"], r["workers"], r["workload_ops"]) != (arm, int(n), 3, 600):
               sys.exit("Unexpected benchmark result")
-          row = [arm, r["seed_records"], *(round(r[k], 1) for k in ("ready_s","verified_s","all_in_s","sdk_ops_per_s")), ram, disk]
-          print("|" + "|".join(map(str, row)) + "|")
-          ' "$arm" "$SWARM_RECORDS" "$ram" "$disk" "$RUNNER_TEMP/result.json" >> "$GITHUB_STEP_SUMMARY"
+          print(json.dumps([arm, r["seed_records"], r["ready_s"], r["verified_s"], r["all_in_s"], r["sdk_ops_per_s"], int(ram), int(disk)]))
+          ' "$arm" "$SWARM_RECORDS" "$ram" "$disk" "$RUNNER_TEMP/result.json" >> "$rows"
           done
+          python -I - "$rows" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          from statistics import mean
+          with open(sys.argv[1]) as f:
+              rows = [json.loads(line) for line in f]
+          if [r[0] for r in rows] != ["fresh", "overlay", "overlay", "fresh"]:
+              sys.exit("Incomplete comparison")
+          print("| Average of two runs per approach | Fresh emulators | Native branches |")
+          print("|---|---:|---:|")
+          for i, (label, fmt, unit) in enumerate([
+              ("Records seeded", ",.0f", ""),
+              ("All three workers ready", ".2f", " s"),
+              ("All three tasks verified", ".2f", " s"),
+              ("Finished, including cleanup", ".2f", " s"),
+              ("SDK operations/sec once ready", ",.0f", ""),
+          ], start=1):
+              cells = [format(mean(r[i] for r in rows if r[0] == arm), fmt) + unit
+                       for arm in ("fresh", "overlay")]
+              print("|", label, "|", " | ".join(cells), "|")
+          print("\nTimes are cumulative from a cold start (lower is better). SDK throughput excludes setup (higher is better).")
+          print("\n<details><summary>Individual runs and runner headroom</summary>\n")
+          print("|Mode|Seed writes|Ready s|Verified s|Cleanup finished s|SDK ops/s|Min available RAM MiB|Min free disk MiB|")
+          print("|---|---:|---:|---:|---:|---:|---:|---:|")
+          for arm, seed, ready, verified, cleanup, rate, ram, disk in rows:
+              print(f"|{arm}|{seed}|{ready:.1f}|{verified:.1f}|{cleanup:.1f}|{rate:.1f}|{ram}|{disk}|")
+          print("\n</details>")
+          PY

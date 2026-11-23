@@ -24,8 +24,10 @@ both approaches pass. Each fresh emulator loads its own copy (three times
 the selected record count); native branches seed once
 and fork three siblings. Both use three concurrent workers and the same 600
 SDK operations. The job runs fresh/overlay/overlay/fresh on one machine and
-publishes a side-by-side table in the Actions job summary. Compare **tasks
-verified** for pipeline latency, not SDK ops/s. Baseline reuse is not measured.
+publishes a side-by-side average of the two runs per approach in the Actions
+summary and log. Use **All three tasks verified** for pipeline latency and
+**SDK operations/sec once ready** for throughput. Expand the individual runs
+to inspect variation and runner headroom. Baseline reuse is not measured.
 
 ```sh
 gh workflow run compare.yml -R TheovanKraay/cosmos-agent-branching-demo -f records=10000
