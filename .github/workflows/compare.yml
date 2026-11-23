@@ -1,0 +1,59 @@
+name: Compare three isolated emulators
+on:
+  workflow_dispatch:
+    inputs:
+      records:
+        description: Starting orders per worker
+        type: choice
+        options: ['100000', '10000']
+        default: '100000'
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: dedicated-cosmos-benchmark
+  cancel-in-progress: false
+jobs:
+  compare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, cosmos-overlay-benchmark]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SWARM_RECORDS: ${{ inputs.records }}
+    steps:
+      - name: Check dedicated Docker VM capacity
+        run: |
+          $vm = docker --context desktop-linux info --format '{{.OSType}} {{.NCPU}} {{.MemTotal}}'
+          if ($LASTEXITCODE -ne 0 -or $vm -notmatch '^linux (\d+) (\d+)$') { throw 'Docker Desktop Linux VM required' }
+          if ([int]$Matches[1] -lt 10 -or [long]$Matches[2] -lt 30GB) { throw 'Insufficient Docker VM CPU or memory' }
+          $mem = wsl -d docker-desktop --exec grep MemAvailable /proc/meminfo
+          if ($LASTEXITCODE -ne 0 -or $mem -notmatch '^MemAvailable:\s+(\d+)\s+kB' -or [long]$Matches[1] -lt 24MB) { throw 'Need 24 GiB available in the Docker VM' }
+          $owned = docker --context desktop-linux ps -aq --filter label=cosmos-agent-overlay
+          if ($LASTEXITCODE -ne 0 -or $owned) { throw 'Inspect previous benchmark containers before starting' }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TheovanKraay/cosmos-agent-swarm
+          ref: baa3ed96450efe4654d5a747fc0c8d3899f42a75
+          token: ${{ secrets.LIBRARY_READ_TOKEN }}
+          persist-credentials: false
+      - name: Build pinned library and validate workload dependencies
+        run: |
+          python -I -c "import azure.cosmos as c; assert c.__version__ == '4.17.1'"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --release --manifest-path backends\filesystem\Cargo.toml --example swarm_compare
+      - name: Compare cold pipelines in alternating order
+        run: |
+          $env:M2_SDK_KEY = [regex]::Match((Get-Content -Raw src\local.rs), 'const EMULATOR_KEY: &str =\s*"([^"]+)"').Groups[1].Value
+          if (!$env:M2_SDK_KEY) { throw 'Local emulator test credential missing' }
+          @("## $env:SWARM_RECORDS orders per worker", 'Cumulative seconds from cold start; lower is better. SDK ops/s excludes setup; higher is better.', '', '|Approach|Seed writes|Ready (s)|Tasks verified (s)|Cleanup finished (s)|SDK ops/s|','|---|---:|---:|---:|---:|---:|') >> $env:GITHUB_STEP_SUMMARY
+          foreach ($arm in 'fresh','overlay','overlay','fresh') {
+            $raw = & .\backends\filesystem\target\release\examples\swarm_compare.exe $arm
+            if ($LASTEXITCODE) { throw "$arm failed; no result for this arm" }
+            $r = $raw | ConvertFrom-Json
+            if ($r.mode -ne $arm -or $r.fixture_records -ne [int]$env:SWARM_RECORDS -or $r.workload_ops -ne 600) { throw 'Unexpected report' }
+            $raw
+            '|{0}|{1}|{2:N1}|{3:N1}|{4:N1}|{5:N0}|' -f $arm,$r.seed_records,$r.ready_s,$r.verified_s,$r.all_in_s,$r.sdk_ops_per_s >> $env:GITHUB_STEP_SUMMARY
+          }
