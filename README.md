@@ -29,6 +29,11 @@ summary and log. Use **All three tasks verified** for pipeline latency and
 **SDK operations/sec once ready** for throughput. Expand the individual runs
 to inspect variation and runner headroom. Baseline reuse is not measured.
 
+For throughput diagnosis select **profile**. This adds a plain-volume control
+that restarts each seeded emulator before serving traffic. After the original
+600-operation burst, each arm runs two 12,000-operation windows against the
+same keys and reports client-side mean read and write latency separately.
+
 ```sh
 gh workflow run compare.yml -R TheovanKraay/cosmos-agent-branching-demo -f records=10000
 # After the 10k job passes:
