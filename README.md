@@ -1,5 +1,21 @@
 # Cosmos emulator branching: cold CI comparison
 
+## One-command rename check (GitHub-hosted)
+
+From any directory with the GitHub CLI signed in, run:
+
+```sh
+gh workflow run rename-smoke.yml -R TheovanKraay/cosmos-agent-branching-demo
+```
+
+This tests the pinned Cargo package and its Rust import on GitHub's Ubuntu
+runner. It uses the existing `LIBRARY_READ_TOKEN`; no Docker, emulator,
+self-hosted runner, or local build is needed. See the
+[smoke test runs](https://github.com/TheovanKraay/cosmos-agent-branching-demo/actions/workflows/rename-smoke.yml)
+for the result.
+
+## Separate emulator benchmark
+
 Use **Actions → Compare three isolated emulators → Run workflow** on `main`.
 Before benchmarking, CI selects the `cosmos-agent-branching` Cargo package
 and runs an integration test that imports `cosmos_agent_branching`. A rename
