@@ -1,6 +1,9 @@
 # Cosmos emulator branching: cold CI comparison
 
 Use **Actions → Compare three isolated emulators → Run workflow** on `main`.
+Before benchmarking, CI selects the `cosmos-agent-branching` Cargo package
+and runs an integration test that imports `cosmos_agent_branching`. A rename
+failure stops the job before any emulator is started.
 The default fixture is **100,000 orders per worker**. Each fresh emulator
 loads its own copy (300,000 seed writes); native branches seed once (100,000)
 and fork three siblings. Both use three concurrent workers and the same 600
