@@ -3,59 +3,78 @@ on:
   workflow_dispatch:
     inputs:
       records:
-        description: Starting orders per worker
+        description: Starting orders per worker (try 10000 first)
         type: choice
-        options: ['100000', '10000']
-        default: '100000'
+        options: ['10000', '100000']
+        default: '10000'
         required: true
 permissions:
   contents: read
 concurrency:
-  group: dedicated-cosmos-benchmark
+  group: hosted-cosmos-benchmark
   cancel-in-progress: false
 jobs:
   compare:
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Windows, X64, cosmos-overlay-benchmark]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    defaults:
-      run:
-        shell: pwsh
     env:
       SWARM_RECORDS: ${{ inputs.records }}
+      CARGO_BUILD_JOBS: '2'
+      IMAGE: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406
     steps:
-      - name: Check dedicated Docker VM capacity
-        run: |
-          $vm = docker --context desktop-linux info --format '{{.OSType}} {{.NCPU}} {{.MemTotal}}'
-          if ($LASTEXITCODE -ne 0 -or $vm -notmatch '^linux (\d+) (\d+)$') { throw 'Docker Desktop Linux VM required' }
-          if ([int]$Matches[1] -lt 10 -or [long]$Matches[2] -lt 30GB) { throw 'Insufficient Docker VM CPU or memory' }
-          $mem = wsl -d docker-desktop --exec grep MemAvailable /proc/meminfo
-          if ($LASTEXITCODE -ne 0 -or $mem -notmatch '^MemAvailable:\s+(\d+)\s+kB' -or [long]$Matches[1] -lt 24MB) { throw 'Need 24 GiB available in the Docker VM' }
-          $owned = docker --context desktop-linux ps -aq --filter label=cosmos-agent-overlay
-          if ($LASTEXITCODE -ne 0 -or $owned) { throw 'Inspect previous benchmark containers before starting' }
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
           ref: a76401fe420e7a0d54963dd18fe022054c26e43a
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
-      - name: Smoke-test renamed Cargo package and Rust import
-        run: cargo test --locked -p cosmos-agent-branching --test local
-      - name: Build pinned library and validate workload dependencies
+      - name: Prepare hosted Linux runner
         run: |
-          python -I -c "import azure.cosmos as c; assert c.__version__ == '4.17.1'"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo build --locked --release --manifest-path backends\filesystem\Cargo.toml --example swarm_compare
-      - name: Compare cold pipelines in alternating order
+          # Map the context name expected by the pinned library to this VM's local daemon.
+          docker context create desktop-linux --docker host=unix:///var/run/docker.sock
+          docker --context desktop-linux info --format 'Docker {{.OSType}}: {{.NCPU}} CPUs, {{.MemTotal}} bytes RAM'
+          df -h /var/lib/docker
+          docker --context desktop-linux pull "$IMAGE"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install azure-cosmos==4.17.1
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: Build comparison
         run: |
-          $env:M2_SDK_KEY = [regex]::Match((Get-Content -Raw src\local.rs), 'const EMULATOR_KEY: &str =\s*"([^"]+)"').Groups[1].Value
-          if (!$env:M2_SDK_KEY) { throw 'Local emulator test credential missing' }
-          @("## $env:SWARM_RECORDS orders per worker", 'Cumulative seconds from cold start; lower is better. SDK ops/s excludes setup; higher is better.', '', '|Approach|Seed writes|Ready (s)|Tasks verified (s)|Cleanup finished (s)|SDK ops/s|','|---|---:|---:|---:|---:|---:|') >> $env:GITHUB_STEP_SUMMARY
-          foreach ($arm in 'fresh','overlay','overlay','fresh') {
-            $raw = & .\backends\filesystem\target\release\examples\swarm_compare.exe $arm
-            if ($LASTEXITCODE) { throw "$arm failed; no result for this arm" }
-            $r = $raw | ConvertFrom-Json
-            if ($r.mode -ne $arm -or $r.fixture_records -ne [int]$env:SWARM_RECORDS -or $r.workload_ops -ne 600) { throw 'Unexpected report' }
-            $raw
-            '|{0}|{1}|{2:N1}|{3:N1}|{4:N1}|{5:N0}|' -f $arm,$r.seed_records,$r.ready_s,$r.verified_s,$r.all_in_s,$r.sdk_ops_per_s >> $env:GITHUB_STEP_SUMMARY
-          }
+          cargo +stable build --locked --release --manifest-path backends/filesystem/Cargo.toml --example swarm_compare >"$RUNNER_TEMP/build.log" 2>&1 || { echo "::error::Pinned benchmark build failed (private compiler output withheld)"; exit 1; }
+      - name: Compare both approaches on this VM
+        run: |
+          M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
+          echo "::add-mask::$M2_SDK_KEY"
+          export M2_SDK_KEY
+          echo "### Three workers, $SWARM_RECORDS orders per worker" >> "$GITHUB_STEP_SUMMARY"
+          echo '|Mode|Seed writes|Ready s|Verified s|Cleanup finished s|SDK ops/s|Min available RAM MiB|Min free disk MiB|' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---|---:|---:|---:|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
+          for arm in fresh overlay overlay fresh; do
+            samples="$RUNNER_TEMP/capacity.tsv"
+            (while :; do
+              echo "$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo) $(df -Pm /var/lib/docker | awk 'END {print $4}')"
+              sleep 1
+            done) > "$samples" &
+            monitor=$!
+            trap 'kill "$monitor" 2>/dev/null || :' EXIT
+            rc=0
+            backends/filesystem/target/release/examples/swarm_compare "$arm" >"$RUNNER_TEMP/result.json" 2>"$RUNNER_TEMP/worker.log" || rc=$?
+            kill "$monitor"
+            wait "$monitor" || :
+            trap - EXIT
+            read -r ram disk < <(awk 'NR==1 || $1<m {m=$1} NR==1 || $2<d {d=$2} END {print m,d}' "$samples")
+            if ((rc)); then
+              echo "::error::$arm failed (exit $rc; sampled minimum available RAM $ram MiB, disk $disk MiB). No successful timing reported."
+              exit 1
+            fi
+            python -I -c '
+          import json, sys
+          arm, n, ram, disk, path = sys.argv[1:]
+          with open(path) as f: r = json.load(f)
+          if (r["mode"], r["fixture_records"], r["workers"], r["workload_ops"]) != (arm, int(n), 3, 600):
+              sys.exit("Unexpected benchmark result")
+          row = [arm, r["seed_records"], *(round(r[k], 1) for k in ("ready_s","verified_s","all_in_s","sdk_ops_per_s")), ram, disk]
+          print("|" + "|".join(map(str, row)) + "|")
+          ' "$arm" "$SWARM_RECORDS" "$ram" "$disk" "$RUNNER_TEMP/result.json" >> "$GITHUB_STEP_SUMMARY"
+          done

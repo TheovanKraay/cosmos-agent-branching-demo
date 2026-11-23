@@ -4,6 +4,7 @@ permissions:
   contents: read
 jobs:
   smoke:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -14,4 +15,6 @@ jobs:
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Test the renamed package and public Rust import
-        run: cargo +stable test --locked -p cosmos-agent-branching --test local
+        run: |
+          cargo +stable test --locked -p cosmos-agent-branching --test local >"$RUNNER_TEMP/smoke.log" 2>&1 || { echo "::error::Rename smoke test failed (private compiler output withheld)"; exit 1; }
+          echo 'Renamed Cargo package and Rust import passed.' >> "$GITHUB_STEP_SUMMARY"
