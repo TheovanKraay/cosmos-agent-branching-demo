@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: 9a5d56da658a7d1ad20dfc551e3b5eb2ca888042
+          ref: c0a182b08bf08fbb16e6d9d4c4168c2451522630
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
