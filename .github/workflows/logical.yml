@@ -35,7 +35,11 @@ jobs:
           cid=$(docker run -d -p 127.0.0.1:18080:8080 -p 127.0.0.1:18081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406 --protocol http --enable-explorer false --enable-telemetry false)
           trap 'docker rm -fv "$cid" >/dev/null' EXIT
           curl -fsS --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/ready >/dev/null
-          target/release/examples/logical_compare "$PROFILE" >"$RUNNER_TEMP/rows" 2>"$RUNNER_TEMP/err" || { echo "::error::Comparison failed after $(wc -l < "$RUNNER_TEMP/rows") complete arms"; exit 1; }
+          target/release/examples/logical_compare "$PROFILE" >"$RUNNER_TEMP/rows" 2>"$RUNNER_TEMP/err" || {
+            echo "::error::Comparison failed after $(wc -l < "$RUNNER_TEMP/rows") complete arms"
+            grep -oiE 'status(_code)?: [1-5][0-9]{2}|[Tt]imeout|throttl(ed|ing)|outcomeunknown|cleanupfailed|limitexceeded|ownership|notready|serviceunavailable|connection reset' "$RUNNER_TEMP/err" | sort -u || :
+            exit 1
+          }
           python - "$RUNNER_TEMP/rows" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json,sys,os
           rows=list(map(json.loads,open(sys.argv[1])))
