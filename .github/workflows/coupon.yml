@@ -1,0 +1,43 @@
+name: Copilot coupon pilot
+on: workflow_dispatch
+permissions:
+  copilot-requests: write
+jobs:
+  coupon:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TheovanKraay/cosmos-agent-swarm
+          ref: cb57b0efe1087bea5fc2abad346adc7017e6adb6
+          token: ${{ secrets.LIBRARY_READ_TOKEN }}
+          persist-credentials: false
+      - name: Prepare disposable runner
+        shell: bash
+        run: |
+          docker context create desktop-linux --docker host=unix:///var/run/docker.sock
+          docker pull mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406
+          python -m venv "$RUNNER_TEMP/sdk"
+          "$RUNNER_TEMP/sdk/bin/pip" install azure-cosmos==4.17.1
+          docker build -t coupon-copilot:pilot - <<'EOF'
+          FROM node:22-bookworm-slim
+          RUN npm install --global @github/copilot@1.0.115
+          USER node
+          WORKDIR /home/node
+          ENTRYPOINT ["copilot"]
+          EOF
+      - name: Run Copilot and independently grade the branch
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SWARM_RECORDS: '10000'
+        run: |
+          M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
+          echo "::add-mask::$M2_SDK_KEY"
+          export M2_SDK_KEY
+          "$RUNNER_TEMP/sdk/bin/python" -I -B backends/filesystem/overlay/copilot_pilot.py 2>"$RUNNER_TEMP/pilot.log" | tee -a "$GITHUB_STEP_SUMMARY" || {
+            grep -oE 'line [0-9]+, in [a-zA-Z_]+|^RuntimeError: (Copilot CLI did not complete|coupon grading failed)|^[A-Za-z]+Error:' "$RUNNER_TEMP/pilot.log" | tail -6
+            exit 1
+          }
