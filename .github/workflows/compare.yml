@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: a499bdb44b046c8f0fb983dc1915b5551eed9421
+          ref: b231d6cc0be3e8cb192d99f7988bce2fa04e0ff8
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -182,7 +182,11 @@ jobs:
             (while :; do used; sleep 1; done) > "$RUNNER_TEMP/used" &
             sampler=$!
             trap 'kill "$sampler" 2>/dev/null || :' EXIT
-            backends/filesystem/target/release/examples/swarm_compare "$arm" > "$RUNNER_TEMP/arm" 2>"$RUNNER_TEMP/worker.log"
+            backends/filesystem/target/release/examples/swarm_compare "$arm" > "$RUNNER_TEMP/arm" 2>"$RUNNER_TEMP/worker.log" || {
+              echo "::error::$arm failed; private logs withheld"
+              grep -oE 'line [0-9]+, in [a-zA-Z_]+|^[A-Za-z]+Error:' "$RUNNER_TEMP/worker.log" | tail -8
+              exit 1
+            }
             kill "$sampler"; wait "$sampler" || :
             trap - EXIT
             python -I - "$RUNNER_TEMP" "$arm" "$before" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
