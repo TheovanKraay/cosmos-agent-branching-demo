@@ -1,0 +1,38 @@
+name: Compare logical branches and ordinary containers
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TheovanKraay/cosmos-agent-swarm
+          ref: a923cd4f44f350119effa96e36cb0f0c3dcb7e32
+          token: ${{ secrets.LIBRARY_READ_TOKEN }}
+          persist-credentials: false
+      - name: Build comparison
+        shell: bash
+        run: |
+          cargo +stable build --locked --release --example logical_compare >"$RUNNER_TEMP/build.log" 2>&1 || {
+            grep -oE '^error(\[E[0-9]+\])?' "$RUNNER_TEMP/build.log" | head; exit 1;
+          }
+      - name: Run matched comparison
+        shell: bash
+        run: |
+          cid=$(docker run -d -p 127.0.0.1:18080:8080 -p 127.0.0.1:18081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406 --protocol http --enable-explorer false --enable-telemetry false)
+          trap 'docker rm -fv "$cid" >/dev/null' EXIT
+          curl -fsS --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/ready >/dev/null
+          target/release/examples/logical_compare >"$RUNNER_TEMP/rows" 2>"$RUNNER_TEMP/err" || { echo "::error::Comparison failed after $(wc -l < "$RUNNER_TEMP/rows") complete arms"; exit 1; }
+          python - "$RUNNER_TEMP/rows" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json,sys
+          rows=list(map(json.loads,open(sys.argv[1])))
+          assert [r['mode'] for r in rows]==['direct','logical','logical','direct']
+          print('| Mode | Fixture documents seeded | Ready s | Work + verification s | Verified s |')
+          print('|---|---:|---:|---:|---:|')
+          for r in rows:
+              print('| {mode} | {seed_docs} | {ready:.3f} | {work:.3f} | {verified:.3f} |'.format(**r))
+          PY
