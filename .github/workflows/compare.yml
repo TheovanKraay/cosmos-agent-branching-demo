@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: 6e6cfe14b409c9c69cab6856be8efb92fa6e3086
+          ref: cb3376c20eff314a8953551051b1adf85c7ef5c0
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -225,18 +225,18 @@ jobs:
           M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
           echo "::add-mask::$M2_SDK_KEY"
           export M2_SDK_KEY
-          python -I -B backends/filesystem/overlay/related_tasks.py copy auto auto copy >"$RUNNER_TEMP/tasks.jsonl" 2>"$RUNNER_TEMP/tasks.log" || {
+          python -I -B backends/filesystem/overlay/related_tasks.py fresh copy auto auto copy fresh >"$RUNNER_TEMP/tasks.jsonl" 2>"$RUNNER_TEMP/tasks.log" || {
             grep -oE 'line [0-9]+, in [a-zA-Z_]+|^[A-Za-z]+Error:' "$RUNNER_TEMP/tasks.log" | tail -8; exit 1;
           }
           python -I - "$RUNNER_TEMP/tasks.jsonl" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json,sys
           rows=[json.loads(l) for l in open(sys.argv[1])]
-          assert [r['backend'] for r in rows]==['copy','reflink','reflink','copy']
-          print('| Backend | All 5 verified s | Seed s | Five forks MiB | Retained data MiB | Overlap s (2 / 3 workers) |')
-          print('|---|---:|---:|---:|---:|---:|')
+          assert [r['backend'] for r in rows]==['fresh','copy','reflink','reflink','copy','fresh']
+          print('| Backend | All 5 verified s | SDK seeding s | Parent replay s | Fork s | Tasks s | Fork MiB | Retained MiB | Overlap s (2 / 3 workers) |')
+          print('|---|---:|---:|---:|---:|---:|---:|---:|---:|')
           for r in rows:
               assert r['tasks']==5 and len(r['overlap_s'])==2 and min(r['overlap_s'])>0
-              print('| {backend} | {verified_s} | {seed_s} | {fork_mib} | {retained_mib} | {overlap_s} |'.format(**r))
+              print('| {backend} | {verified_s} | {seed_s} | {replay_s} | {fork_s} | {task_s} | {fork_mib} | {retained_mib} | {overlap_s} |'.format(**r))
           PY
       - name: Profile storage I/O
         if: ${{ inputs.layouts != 'related' && !startsWith(inputs.layouts,'scale') && !startsWith(inputs.layouts,'heavy') && inputs.layouts != 'cold' && inputs.layouts != 'faults' && (inputs.wal || inputs.patterns || inputs.layouts != 'none') }}
