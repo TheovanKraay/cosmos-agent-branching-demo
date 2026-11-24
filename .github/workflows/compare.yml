@@ -20,6 +20,11 @@ on:
         description: Compare hot and spread replacements with allocation and wait sampling
         type: boolean
         default: false
+      layouts:
+        description: Compare storage layouts (overrides other diagnostic modes)
+        type: choice
+        options: ['none', 'native', 'xfs']
+        default: 'none'
 permissions:
   contents: read
 concurrency:
@@ -38,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: f73d5cdebd324d44a395c530dc0bbadee097eca3
+          ref: 29a1750c3f8b37596d5fb4d30c32d0ee4676d46d
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -52,11 +57,11 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install azure-cosmos==4.17.1
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Build comparison
-        if: ${{ !inputs.wal && !inputs.patterns }}
+        if: ${{ !inputs.wal && !inputs.patterns && inputs.layouts == 'none' }}
         run: |
           cargo +stable build --locked --release --manifest-path backends/filesystem/Cargo.toml --example swarm_compare >"$RUNNER_TEMP/build.log" 2>&1 || { echo "::error::Pinned benchmark build failed (private compiler output withheld)"; exit 1; }
       - name: Compare both approaches on this VM
-        if: ${{ !inputs.profile && !inputs.wal && !inputs.patterns }}
+        if: ${{ !inputs.profile && !inputs.wal && !inputs.patterns && inputs.layouts == 'none' }}
         run: |
           M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
           echo "::add-mask::$M2_SDK_KEY"
@@ -119,7 +124,7 @@ jobs:
           print("\n</details>")
           PY
       - name: Compare first burst and longer mixed workloads
-        if: inputs.profile && !inputs.wal && !inputs.patterns
+        if: inputs.profile && !inputs.wal && !inputs.patterns && inputs.layouts == 'none'
         env:
           SWARM_DIAGNOSTIC: '1'
         run: |
@@ -138,22 +143,53 @@ jobs:
           print("|{}|{:.1f}|{:.1f}|{:.1f}|{:.3f}/{:.3f}|{:.3f}/{:.3f}|".format(r["mode"], r["sdk_ops_per_s"], a["ops_s"], b["ops_s"], a["read_ms"], b["read_ms"], a["write_ms"], b["write_ms"]))
           ' "$RUNNER_TEMP/result.json" "$arm" | tee -a "$GITHUB_STEP_SUMMARY"
           done
+      - name: Prepare disposable XFS scratch
+        if: inputs.layouts == 'xfs'
+        run: |
+          command -v mkfs.xfs || { sudo apt-get update -qq && sudo apt-get install -y xfsprogs; }
+          img=$(mktemp "$RUNNER_TEMP/layout-XXXXXX.img")
+          root=$(mktemp -d "$RUNNER_TEMP/layout-XXXXXX")
+          truncate -s 8G "$img"
+          mkfs.xfs -m reflink=1 "$img"
+          sudo mount -o loop "$img" "$root"
+          sudo chown "$USER" "$root"
+          echo "LAYOUT_XFS=$root" >> "$GITHUB_ENV"
       - name: Profile storage I/O
-        if: inputs.wal || inputs.patterns
+        if: inputs.wal || inputs.patterns || inputs.layouts != 'none'
         env:
           PATTERNS: ${{ inputs.patterns }}
+          LAYOUTS: ${{ inputs.layouts }}
         run: |
           M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
           echo "::add-mask::$M2_SDK_KEY"
           export M2_SDK_KEY
           args=()
           if [[ $PATTERNS == true ]]; then args+=(--patterns); fi
+          if [[ $LAYOUTS != none ]]; then args=(--layouts); fi
+          if [[ $LAYOUTS == xfs ]]; then args+=(--reflink); fi
           rows="$RUNNER_TEMP/storage.jsonl"
-          python -I -B backends/filesystem/overlay/wal_probe.py "${args[@]}" >"$rows" 2>"$RUNNER_TEMP/wal-probe.log" || { echo "::error::Storage probe failed (private stderr withheld)"; exit 1; }
+          python -I -B backends/filesystem/overlay/wal_probe.py "${args[@]}" >"$rows" 2>"$RUNNER_TEMP/wal-probe.log" || { echo "::error::Storage probe failed after $(wc -l < "$rows") arms (private stderr withheld)"; grep -oE 'line [0-9]+, in [a-zA-Z_]+' "$RUNNER_TEMP/wal-probe.log" | tail -4; exit 1; }
           expected=4; if [[ $PATTERNS == true ]]; then expected=8; fi
+          if [[ $LAYOUTS == native ]]; then expected=8; elif [[ $LAYOUTS == xfs ]]; then expected=10; fi
           [[ $(wc -l < "$rows") == "$expected" ]] || { echo "::error::Incomplete storage probe"; exit 1; }
           cat "$rows"
-          if [[ $PATTERNS == true ]]; then
+          if [[ $LAYOUTS != none ]]; then
+            python -I - "$rows" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, os, sys
+          from statistics import mean
+          arms = [json.loads(line) for line in open(sys.argv[1])]
+          modes = ['copy','overlay','full-upper','plain-overlay'] + (['reflink'] if os.environ['LAYOUTS']=='xfs' else [])
+          assert [a['mode'] for a in arms] == modes + modes[::-1]
+          print('| Layout | First ms/write | Repeat ms/write | Repeat ops/s | Verified fork of 3 (s) |')
+          print('|---|---:|---:|---:|---:|')
+          for mode in modes:
+              pair = [a for a in arms if a['mode']==mode]
+              assert all([r['window'] for r in a['rows']]==['first','repeat'] for a in pair)
+              v = [mean(a['rows'][i][k] for a in pair) for i,k in [(0,'mean_ms'),(1,'mean_ms'),(1,'ops_s')]]
+              v.append(mean(a['fork_seconds'] for a in pair))
+              print(f'| {mode} | ' + ' | '.join(f'{x:.2f}' for x in v) + ' |')
+          PY
+          elif [[ $PATTERNS == true ]]; then
             python -I - "$rows" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, sys
           from collections import defaultdict
