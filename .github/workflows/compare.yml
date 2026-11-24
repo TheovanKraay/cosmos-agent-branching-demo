@@ -23,7 +23,7 @@ on:
       layouts:
         description: Compare storage layouts (overrides other diagnostic modes)
         type: choice
-        options: ['none', 'native', 'xfs', 'xfs-proof', 'cold', 'faults', 'heavy', 'heavy-reverse']
+        options: ['none', 'native', 'xfs', 'xfs-proof', 'cold', 'faults', 'heavy', 'heavy-reverse', 'scale', 'scale-ext4']
         default: 'none'
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: b231d6cc0be3e8cb192d99f7988bce2fa04e0ff8
+          ref: 3a775b51c10df48d0c310e8c3944e8e0ee6ffff3
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -57,7 +57,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install azure-cosmos==4.17.1
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Build comparison
-        if: ${{ inputs.layouts == 'cold' || startsWith(inputs.layouts,'heavy') || (!inputs.wal && !inputs.patterns && inputs.layouts == 'none') }}
+        if: ${{ inputs.layouts == 'cold' || startsWith(inputs.layouts,'heavy') || startsWith(inputs.layouts,'scale') || (!inputs.wal && !inputs.patterns && inputs.layouts == 'none') }}
         run: |
           cargo +stable build --locked --release --manifest-path backends/filesystem/Cargo.toml --example swarm_compare >"$RUNNER_TEMP/build.log" 2>&1 || { echo "::error::Pinned benchmark build failed (private compiler output withheld)"; exit 1; }
       - name: Compare both approaches on this VM
@@ -144,19 +144,21 @@ jobs:
           ' "$RUNNER_TEMP/result.json" "$arm" | tee -a "$GITHUB_STEP_SUMMARY"
           done
       - name: Prepare disposable XFS scratch
-        if: contains(fromJSON('["xfs","xfs-proof","cold","faults","heavy","heavy-reverse"]'), inputs.layouts)
+        if: contains(fromJSON('["xfs","xfs-proof","cold","faults","heavy","heavy-reverse","scale","scale-ext4"]'), inputs.layouts)
+        env:
+          LAYOUT: ${{ inputs.layouts }}
         run: |
           command -v mkfs.xfs || { sudo apt-get update -qq && sudo apt-get install -y xfsprogs; }
           img=$(mktemp "$RUNNER_TEMP/layout-XXXXXX.img")
           root=$(mktemp -d "$RUNNER_TEMP/layout-XXXXXX")
           truncate -s 8G "$img"
-          mkfs.xfs -m reflink=1 "$img"
+          if [[ $LAYOUT == scale-ext4 ]]; then mkfs.ext4 -F "$img"; else mkfs.xfs -m reflink=1 "$img"; fi
           sudo mount -o loop "$img" "$root"
           sudo chown "$USER" "$root"
           echo "LAYOUT_XFS=$root" >> "$GITHUB_ENV"
-          echo "One-time XFS preparation: ${SECONDS}s" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "One-time scratch filesystem preparation: ${SECONDS}s" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Compare verified cold sessions on XFS
-        if: inputs.layouts == 'cold' || startsWith(inputs.layouts,'heavy')
+        if: inputs.layouts == 'cold' || startsWith(inputs.layouts,'heavy') || startsWith(inputs.layouts,'scale')
         shell: bash
         env:
           SWARM_CI_XFS: '1'
@@ -166,7 +168,11 @@ jobs:
           echo "::add-mask::$M2_SDK_KEY"
           export M2_SDK_KEY
           arms=(fresh overlay reflink reflink overlay fresh)
-          if [[ "$TRIAL" == heavy* ]]; then
+          if [[ "$TRIAL" == scale* ]]; then
+            arms=(fresh:3 auto:3 auto:4 fresh:4); if [[ "$TRIAL" == scale-ext4 ]]; then arms=(auto:4); fi
+            echo '| Workers | Mode | Selected backend | Verified s | Ready s | Mixed ops/s | Peak growth MiB |' >> "$GITHUB_STEP_SUMMARY"
+            echo '|---:|---|---|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$TRIAL" == heavy* ]]; then
             export SWARM_HEAVY=1
             [[ $SWARM_RECORDS == 100000 ]] || { echo "::error::Heavy trials require 100000 orders"; exit 1; }
             arms=(overlay reflink); if [[ $TRIAL == heavy-reverse ]]; then arms=(reflink overlay); fi
@@ -177,6 +183,7 @@ jobs:
             echo '|---|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
           fi
           for arm in "${arms[@]}"; do
+            if [[ "$TRIAL" == scale* ]]; then export SWARM_WORKERS="${arm#*:}"; arm="${arm%:*}"; fi
             used() { df -B1 --output=used "$LAYOUT_XFS" | tail -1; }
             before=$(used)
             (while :; do used; sleep 1; done) > "$RUNNER_TEMP/used" &
@@ -196,7 +203,13 @@ jobs:
           assert r['mode']==sys.argv[2]
           growth=(max(map(int,(folder/'used').read_text().split()))-int(sys.argv[3]))/2**20
           import os
-          if os.environ['TRIAL'].startswith('heavy'):
+          if os.environ['TRIAL'].startswith('scale'):
+              n=int(os.environ['SWARM_WORKERS'])
+              assert r['workers']==n and r['workload_ops']==200*n
+              expected='none' if r['mode']=='fresh' else 'overlay' if os.environ['TRIAL']=='scale-ext4' else 'reflink'
+              assert r['backend']==expected
+              print(f"| {n} | {r['mode']} | {expected} | {r['verified_s']:.2f} | {r['ready_s']:.2f} | {r['sdk_ops_per_s']:.1f} | {growth:.1f} |")
+          elif os.environ['TRIAL'].startswith('heavy'):
               a,b=r['first'],r['repeat']
               assert a['writes']==b['writes']==75000
               print(f"| {r['mode']} | {r['verified_s']:.2f} | {r['ready_s']:.2f} | {a['ops_s']:.1f} | {b['ops_s']:.1f} | {a['p95_ms']:.3f} | {b['p95_ms']:.3f} | {growth:.1f} |")
@@ -206,7 +219,7 @@ jobs:
           PY
           done
       - name: Profile storage I/O
-        if: ${{ !startsWith(inputs.layouts,'heavy') && inputs.layouts != 'cold' && inputs.layouts != 'faults' && (inputs.wal || inputs.patterns || inputs.layouts != 'none') }}
+        if: ${{ !startsWith(inputs.layouts,'scale') && !startsWith(inputs.layouts,'heavy') && inputs.layouts != 'cold' && inputs.layouts != 'faults' && (inputs.wal || inputs.patterns || inputs.layouts != 'none') }}
         env:
           PATTERNS: ${{ inputs.patterns }}
           LAYOUTS: ${{ inputs.layouts }}
