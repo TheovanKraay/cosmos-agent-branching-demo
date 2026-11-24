@@ -16,6 +16,15 @@ for the result.
 
 ## Separate emulator benchmark
 
+For the **three vs four parallel SDK workers** comparison, open
+[Run workflow](https://github.com/TheovanKraay/cosmos-agent-branching-demo/actions/workflows/compare.yml),
+choose `main`, `100000` starting orders and the `scale` layout; leave the other
+diagnostics unchecked. This compares independently seeded emulators with
+automatically selected branches on hosted XFS. The summary shows the actual
+backend, workers, time to verified tasks, mixed SDK throughput and sampled
+disk growth. Use `scale-ext4` with `10000` for a separate four-worker fallback
+check, not a speed comparison. Four is the largest supported worker count.
+
 Use **Actions → Compare three isolated emulators → Run workflow** on `main`.
 Run the separate rename smoke test above first if you want to verify
 private checkout and compilation without starting any emulators.
