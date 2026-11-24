@@ -1,5 +1,12 @@
 name: Compare logical branches and ordinary containers
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Per worker: small = 300 records / 20 edits; large = 10000 / 667'
+        type: choice
+        default: small
+        options: [small, large]
 permissions:
   contents: read
 jobs:
@@ -11,7 +18,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: a923cd4f44f350119effa96e36cb0f0c3dcb7e32
+          ref: b6bdd9683c719993a1f0ee7530c6cce45e065de6
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Build comparison
@@ -22,15 +29,20 @@ jobs:
           }
       - name: Run matched comparison
         shell: bash
+        env:
+          PROFILE: ${{ inputs.profile }}
         run: |
           cid=$(docker run -d -p 127.0.0.1:18080:8080 -p 127.0.0.1:18081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406 --protocol http --enable-explorer false --enable-telemetry false)
           trap 'docker rm -fv "$cid" >/dev/null' EXIT
           curl -fsS --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/ready >/dev/null
-          target/release/examples/logical_compare >"$RUNNER_TEMP/rows" 2>"$RUNNER_TEMP/err" || { echo "::error::Comparison failed after $(wc -l < "$RUNNER_TEMP/rows") complete arms"; exit 1; }
+          target/release/examples/logical_compare "$PROFILE" >"$RUNNER_TEMP/rows" 2>"$RUNNER_TEMP/err" || { echo "::error::Comparison failed after $(wc -l < "$RUNNER_TEMP/rows") complete arms"; exit 1; }
           python - "$RUNNER_TEMP/rows" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import json,sys
+          import json,sys,os
           rows=list(map(json.loads,open(sys.argv[1])))
           assert [r['mode'] for r in rows]==['direct','logical','logical','direct']
+          n, edits = {'small':(300,20),'large':(10000,667)}[os.environ['PROFILE']]
+          assert all((r['records'],r['edits_per_worker'],r['seed_docs'])==(n,edits,n if r['mode']=='logical' else 3*n) for r in rows)
+          print(f'Three concurrent workers; {n:,} records and {edits:,} edits per worker.\n')
           print('| Mode | Fixture documents seeded | Ready s | Work + verification s | Verified s |')
           print('|---|---:|---:|---:|---:|')
           for r in rows:
