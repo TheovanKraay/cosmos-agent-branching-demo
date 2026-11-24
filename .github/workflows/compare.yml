@@ -16,6 +16,10 @@ on:
         description: Measure PostgreSQL WAL I/O for ordinary versus layered stopped forks
         type: boolean
         default: false
+      patterns:
+        description: Compare hot and spread replacements with allocation and wait sampling
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -34,7 +38,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: bb75ae8ec8172ebaf752e1ed7239fc04a5a78db4
+          ref: 2563d85637a9df83ff439a976dd73fe48e4906b0
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -48,11 +52,11 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install azure-cosmos==4.17.1
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Build comparison
-        if: ${{ !inputs.wal }}
+        if: ${{ !inputs.wal && !inputs.patterns }}
         run: |
           cargo +stable build --locked --release --manifest-path backends/filesystem/Cargo.toml --example swarm_compare >"$RUNNER_TEMP/build.log" 2>&1 || { echo "::error::Pinned benchmark build failed (private compiler output withheld)"; exit 1; }
       - name: Compare both approaches on this VM
-        if: ${{ !inputs.profile && !inputs.wal }}
+        if: ${{ !inputs.profile && !inputs.wal && !inputs.patterns }}
         run: |
           M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
           echo "::add-mask::$M2_SDK_KEY"
@@ -115,7 +119,7 @@ jobs:
           print("\n</details>")
           PY
       - name: Compare first burst and longer mixed workloads
-        if: inputs.profile && !inputs.wal
+        if: inputs.profile && !inputs.wal && !inputs.patterns
         env:
           SWARM_DIAGNOSTIC: '1'
         run: |
@@ -134,10 +138,14 @@ jobs:
           print("|{}|{:.1f}|{:.1f}|{:.1f}|{:.3f}/{:.3f}|{:.3f}/{:.3f}|".format(r["mode"], r["sdk_ops_per_s"], a["ops_s"], b["ops_s"], a["read_ms"], b["read_ms"], a["write_ms"], b["write_ms"]))
           ' "$RUNNER_TEMP/result.json" "$arm" | tee -a "$GITHUB_STEP_SUMMARY"
           done
-      - name: Profile WAL I/O
-        if: inputs.wal
+      - name: Profile storage I/O
+        if: inputs.wal || inputs.patterns
+        env:
+          PATTERNS: ${{ inputs.patterns }}
         run: |
           M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
           echo "::add-mask::$M2_SDK_KEY"
           export M2_SDK_KEY
-          python -I -B backends/filesystem/overlay/wal_probe.py 2>"$RUNNER_TEMP/wal-probe.log" | tee -a "$GITHUB_STEP_SUMMARY"
+          args=()
+          if [[ $PATTERNS == true ]]; then args+=(--patterns); fi
+          python -I -B backends/filesystem/overlay/wal_probe.py "${args[@]}" 2>"$RUNNER_TEMP/wal-probe.log" | tee -a "$GITHUB_STEP_SUMMARY"
