@@ -3,10 +3,10 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: 'Per worker: small = 300 records / 20 edits; large = 10000 / 667'
+        description: 'Per worker: small = 300/20 records/edits, medium = 3000/200, large = 10000/667'
         type: choice
         default: small
-        options: [small, large]
+        options: [small, medium, large]
 permissions:
   contents: read
 jobs:
@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: b6bdd9683c719993a1f0ee7530c6cce45e065de6
+          ref: 98aa16bcb898b6073544d6d653b4dbedde943d3f
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Build comparison
@@ -44,7 +44,7 @@ jobs:
           import json,sys,os
           rows=list(map(json.loads,open(sys.argv[1])))
           assert [r['mode'] for r in rows]==['direct','logical','logical','direct']
-          n, edits = {'small':(300,20),'large':(10000,667)}[os.environ['PROFILE']]
+          n, edits = {'small':(300,20),'medium':(3000,200),'large':(10000,667)}[os.environ['PROFILE']]
           assert all((r['records'],r['edits_per_worker'],r['seed_docs'])==(n,edits,n if r['mode']=='logical' else 3*n) for r in rows)
           print(f'Three concurrent workers; {n:,} records and {edits:,} edits per worker.\n')
           print('| Mode | Fixture documents seeded | Ready s | Work + verification s | Verified s |')
