@@ -23,7 +23,7 @@ on:
       layouts:
         description: Compare storage layouts (overrides other diagnostic modes)
         type: choice
-        options: ['none', 'native', 'xfs']
+        options: ['none', 'native', 'xfs', 'xfs-proof']
         default: 'none'
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: 29a1750c3f8b37596d5fb4d30c32d0ee4676d46d
+          ref: 07ada11972f0592a305dfa8be7a0b0fb4a55eb59
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -144,7 +144,7 @@ jobs:
           ' "$RUNNER_TEMP/result.json" "$arm" | tee -a "$GITHUB_STEP_SUMMARY"
           done
       - name: Prepare disposable XFS scratch
-        if: inputs.layouts == 'xfs'
+        if: inputs.layouts == 'xfs' || inputs.layouts == 'xfs-proof'
         run: |
           command -v mkfs.xfs || { sudo apt-get update -qq && sudo apt-get install -y xfsprogs; }
           img=$(mktemp "$RUNNER_TEMP/layout-XXXXXX.img")
@@ -167,13 +167,17 @@ jobs:
           if [[ $PATTERNS == true ]]; then args+=(--patterns); fi
           if [[ $LAYOUTS != none ]]; then args=(--layouts); fi
           if [[ $LAYOUTS == xfs ]]; then args+=(--reflink); fi
+          if [[ $LAYOUTS == xfs-proof ]]; then args=(--reflink --proof); fi
           rows="$RUNNER_TEMP/storage.jsonl"
           python -I -B backends/filesystem/overlay/wal_probe.py "${args[@]}" >"$rows" 2>"$RUNNER_TEMP/wal-probe.log" || { echo "::error::Storage probe failed after $(wc -l < "$rows") arms (private stderr withheld)"; grep -oE 'line [0-9]+, in [a-zA-Z_]+' "$RUNNER_TEMP/wal-probe.log" | tail -4; exit 1; }
           expected=4; if [[ $PATTERNS == true ]]; then expected=8; fi
           if [[ $LAYOUTS == native ]]; then expected=8; elif [[ $LAYOUTS == xfs ]]; then expected=10; fi
+          if [[ $LAYOUTS == xfs-proof ]]; then expected=1; fi
           [[ $(wc -l < "$rows") == "$expected" ]] || { echo "::error::Incomplete storage probe"; exit 1; }
           cat "$rows"
-          if [[ $LAYOUTS != none ]]; then
+          if [[ $LAYOUTS == xfs-proof ]]; then
+            python -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["recursive_readback"] and r["reset"] and 0 < r["reflink_physical_bytes"] < r["copy_physical_bytes"]; print("Verified recursive isolation and reset. Fork allocation: full copy %.2f MiB; reflink %.2f MiB." % (r["copy_physical_bytes"]/2**20,r["reflink_physical_bytes"]/2**20))' "$rows" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ $LAYOUTS != none ]]; then
             python -I - "$rows" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, os, sys
           from statistics import mean
