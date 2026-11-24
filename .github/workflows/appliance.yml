@@ -1,0 +1,31 @@
+name: Single-container branching appliance prototype
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  nested:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TheovanKraay/cosmos-agent-swarm
+          ref: 3d1b3db623cebb2a09ab384e258656aa21e60a01
+          token: ${{ secrets.LIBRARY_READ_TOKEN }}
+          persist-credentials: false
+      - name: Build and exercise disposable appliance
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/sdk"
+          "$RUNNER_TEMP/sdk/bin/pip" install azure-cosmos==4.17.1
+          M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
+          echo "::add-mask::$M2_SDK_KEY"
+          export M2_SDK_KEY
+          trap 'docker compose -f backends/filesystem/appliance/compose.yaml down -v >/dev/null' EXIT
+          log="$RUNNER_TEMP/appliance.log"
+          python="$RUNNER_TEMP/sdk/bin/python"
+          "$python" backends/filesystem/appliance/smoke.py >"$log" 2>&1 || {
+            grep -oE 'line [0-9]+, in [a-zA-Z_]+|^[A-Za-z]+Error:|ERROR: unable to select packages|failed to solve|dependency failed to start' "$log" | tail -10; exit 1;
+          }
+          grep '^Nested appliance passed ' "$log" | tee -a "$GITHUB_STEP_SUMMARY"
