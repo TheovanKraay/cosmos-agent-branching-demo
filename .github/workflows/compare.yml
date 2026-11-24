@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: 2563d85637a9df83ff439a976dd73fe48e4906b0
+          ref: f73d5cdebd324d44a395c530dc0bbadee097eca3
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -148,4 +148,30 @@ jobs:
           export M2_SDK_KEY
           args=()
           if [[ $PATTERNS == true ]]; then args+=(--patterns); fi
-          python -I -B backends/filesystem/overlay/wal_probe.py "${args[@]}" 2>"$RUNNER_TEMP/wal-probe.log" | tee -a "$GITHUB_STEP_SUMMARY"
+          rows="$RUNNER_TEMP/storage.jsonl"
+          python -I -B backends/filesystem/overlay/wal_probe.py "${args[@]}" >"$rows" 2>"$RUNNER_TEMP/wal-probe.log" || { echo "::error::Storage probe failed (private stderr withheld)"; exit 1; }
+          expected=4; if [[ $PATTERNS == true ]]; then expected=8; fi
+          [[ $(wc -l < "$rows") == "$expected" ]] || { echo "::error::Incomplete storage probe"; exit 1; }
+          cat "$rows"
+          if [[ $PATTERNS == true ]]; then
+            python -I - "$rows" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          from collections import defaultdict
+          from statistics import mean
+          groups = defaultdict(list)
+          for line in open(sys.argv[1]):
+              arm = json.loads(line)
+              for r in arm['rows']:
+                  groups[arm['pattern'], r['window'], arm['mode']].append(r)
+          print('| Keys | Window | Copy ms/write | Overlay ms/write | Copy growth MiB | Overlay growth MiB |')
+          print('|---|---|---:|---:|---:|---:|')
+          for p in ('hot','spread'):
+              for w in ('first','repeat'):
+                  c,o = (groups[p,w,m] for m in ('copy','overlay'))
+                  assert len(c) == len(o) == 2
+                  values = [mean(r[k] for r in g)/d for k,d in [('mean_ms',1),('growth',2**20)] for g in (c,o)]
+                  print(f'| {p} | {w} | ' + ' | '.join(f'{v:.2f}' for v in values) + ' |')
+          PY
+          else
+            cat "$rows" >> "$GITHUB_STEP_SUMMARY"
+          fi
