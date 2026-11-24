@@ -23,7 +23,7 @@ on:
       layouts:
         description: Compare storage layouts (overrides other diagnostic modes)
         type: choice
-        options: ['none', 'native', 'xfs', 'xfs-proof', 'cold', 'faults']
+        options: ['none', 'native', 'xfs', 'xfs-proof', 'cold', 'faults', 'heavy', 'heavy-reverse']
         default: 'none'
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-swarm
-          ref: c0a182b08bf08fbb16e6d9d4c4168c2451522630
+          ref: a499bdb44b046c8f0fb983dc1915b5551eed9421
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Prepare hosted Linux runner
@@ -57,7 +57,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install azure-cosmos==4.17.1
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Build comparison
-        if: ${{ inputs.layouts == 'cold' || (!inputs.wal && !inputs.patterns && inputs.layouts == 'none') }}
+        if: ${{ inputs.layouts == 'cold' || startsWith(inputs.layouts,'heavy') || (!inputs.wal && !inputs.patterns && inputs.layouts == 'none') }}
         run: |
           cargo +stable build --locked --release --manifest-path backends/filesystem/Cargo.toml --example swarm_compare >"$RUNNER_TEMP/build.log" 2>&1 || { echo "::error::Pinned benchmark build failed (private compiler output withheld)"; exit 1; }
       - name: Compare both approaches on this VM
@@ -144,7 +144,7 @@ jobs:
           ' "$RUNNER_TEMP/result.json" "$arm" | tee -a "$GITHUB_STEP_SUMMARY"
           done
       - name: Prepare disposable XFS scratch
-        if: contains(fromJSON('["xfs","xfs-proof","cold","faults"]'), inputs.layouts)
+        if: contains(fromJSON('["xfs","xfs-proof","cold","faults","heavy","heavy-reverse"]'), inputs.layouts)
         run: |
           command -v mkfs.xfs || { sudo apt-get update -qq && sudo apt-get install -y xfsprogs; }
           img=$(mktemp "$RUNNER_TEMP/layout-XXXXXX.img")
@@ -156,17 +156,27 @@ jobs:
           echo "LAYOUT_XFS=$root" >> "$GITHUB_ENV"
           echo "One-time XFS preparation: ${SECONDS}s" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Compare verified cold sessions on XFS
-        if: inputs.layouts == 'cold'
+        if: inputs.layouts == 'cold' || startsWith(inputs.layouts,'heavy')
         shell: bash
         env:
           SWARM_CI_XFS: '1'
+          TRIAL: ${{ inputs.layouts }}
         run: |
           M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
           echo "::add-mask::$M2_SDK_KEY"
           export M2_SDK_KEY
-          echo '| Mode | Verified s | Ready s | Warm replace ms | Sampled peak data growth MiB |' >> "$GITHUB_STEP_SUMMARY"
-          echo '|---|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
-          for arm in fresh overlay reflink reflink overlay fresh; do
+          arms=(fresh overlay reflink reflink overlay fresh)
+          if [[ "$TRIAL" == heavy* ]]; then
+            export SWARM_HEAVY=1
+            [[ $SWARM_RECORDS == 100000 ]] || { echo "::error::Heavy trials require 100000 orders"; exit 1; }
+            arms=(overlay reflink); if [[ $TRIAL == heavy-reverse ]]; then arms=(reflink overlay); fi
+            echo '| Mode | Verified s | Ready s | First writes/s | Repeat writes/s | First p95 ms | Repeat p95 ms | Peak growth MiB |' >> "$GITHUB_STEP_SUMMARY"
+            echo '|---|---:|---:|---:|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '| Mode | Verified s | Ready s | Warm replace ms | Sampled peak data growth MiB |' >> "$GITHUB_STEP_SUMMARY"
+            echo '|---|---:|---:|---:|---:|' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for arm in "${arms[@]}"; do
             used() { df -B1 --output=used "$LAYOUT_XFS" | tail -1; }
             before=$(used)
             (while :; do used; sleep 1; done) > "$RUNNER_TEMP/used" &
@@ -179,13 +189,20 @@ jobs:
           import json,pathlib,sys
           folder=pathlib.Path(sys.argv[1])
           r=json.loads((folder/'arm').read_text())
-          assert r['mode']==sys.argv[2] and r['workers']==3 and len(r['profile'])==2
+          assert r['mode']==sys.argv[2]
           growth=(max(map(int,(folder/'used').read_text().split()))-int(sys.argv[3]))/2**20
-          print(f"| {r['mode']} | {r['verified_s']:.2f} | {r['ready_s']:.2f} | {sum(w['write_ms'] for w in r['profile'])/2:.3f} | {growth:.1f} |")
+          import os
+          if os.environ['TRIAL'].startswith('heavy'):
+              a,b=r['first'],r['repeat']
+              assert a['writes']==b['writes']==75000
+              print(f"| {r['mode']} | {r['verified_s']:.2f} | {r['ready_s']:.2f} | {a['ops_s']:.1f} | {b['ops_s']:.1f} | {a['p95_ms']:.3f} | {b['p95_ms']:.3f} | {growth:.1f} |")
+          else:
+              assert r['workers']==3 and len(r['profile'])==2
+              print(f"| {r['mode']} | {r['verified_s']:.2f} | {r['ready_s']:.2f} | {sum(w['write_ms'] for w in r['profile'])/2:.3f} | {growth:.1f} |")
           PY
           done
       - name: Profile storage I/O
-        if: inputs.layouts != 'cold' && inputs.layouts != 'faults' && (inputs.wal || inputs.patterns || inputs.layouts != 'none')
+        if: ${{ !startsWith(inputs.layouts,'heavy') && inputs.layouts != 'cold' && inputs.layouts != 'faults' && (inputs.wal || inputs.patterns || inputs.layouts != 'none') }}
         env:
           PATTERNS: ${{ inputs.patterns }}
           LAYOUTS: ${{ inputs.layouts }}
