@@ -1,5 +1,8 @@
 # Cosmos emulator branching: cold CI comparison
 
+These workflows test the [Cosmos Agent Branching development fork](https://github.com/TheovanKraay/cosmos-agent-branching).
+Its upstream is [AzureCosmosDB/cosmos-agent-branching](https://github.com/AzureCosmosDB/cosmos-agent-branching).
+
 ## One-command rename check (GitHub-hosted)
 
 From any directory with the GitHub CLI signed in, run:
@@ -59,7 +62,7 @@ than changing the test or falling back to a full copy.
 
 The demo can be public while the library remains private. Keep
 `LIBRARY_READ_TOKEN` in Actions secrets, limited to read-only Contents on
-`TheovanKraay/cosmos-agent-swarm`. Both workflows check out a pinned
+`TheovanKraay/cosmos-agent-branching`. Both workflows check out a pinned
 revision without persisting credentials; neither publishes library source,
 raw emulator logs, or build artifacts. Only trusted maintainers should be
 able to change the workflows. No Azure account is needed.

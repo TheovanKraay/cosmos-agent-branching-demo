@@ -13,8 +13,8 @@ jobs:
       - name: Install only the skill in an empty consumer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: TheovanKraay/cosmos-agent-swarm
-          ref: 6a3c255342fadbecb525ef6ca726fb7c799d99ba
+          repository: TheovanKraay/cosmos-agent-branching
+          ref: b4c26912761f584ebda977f6e02bc91c9720b858
           path: instructions
           sparse-checkout: .github/skills/native-cosmos-branching/SKILL.md
           sparse-checkout-cone-mode: false
@@ -48,8 +48,8 @@ jobs:
           text=(root/'proposal').read_text().strip()
           fence=re.fullmatch(r'```(?:json)?\s*(.*?)\s*```',text,re.S)
           p=json.loads(fence[1] if fence else text)
-          assert p['repository']=='TheovanKraay/cosmos-agent-swarm'
-          assert p['revision']=='0a64d54076b930b5200b8708047637b7f2529ae4'
+          assert p['repository']=='TheovanKraay/cosmos-agent-branching'
+          assert p['revision']=='c687fb8e6f7cbe30a709202b4d6cf74cc183e000'
           assert (p['pythonpath'],p['module'],p['class'])==('backends/filesystem/appliance','client','Session')
           with open(os.environ['GITHUB_OUTPUT'],'a') as out:
               for k in ('repository','revision','pythonpath'):

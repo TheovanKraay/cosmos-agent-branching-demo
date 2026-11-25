@@ -17,8 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: TheovanKraay/cosmos-agent-swarm
-          ref: 98aa16bcb898b6073544d6d653b4dbedde943d3f
+          repository: TheovanKraay/cosmos-agent-branching
+          ref: b4c26912761f584ebda977f6e02bc91c9720b858
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Build comparison
