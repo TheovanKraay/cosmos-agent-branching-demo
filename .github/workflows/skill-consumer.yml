@@ -1,0 +1,113 @@
+name: Native skill downstream acceptance
+on: workflow_dispatch
+permissions: {}
+jobs:
+  consumer:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      copilot-requests: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install only the skill in an empty consumer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TheovanKraay/cosmos-agent-swarm
+          ref: 6a3c255342fadbecb525ef6ca726fb7c799d99ba
+          path: instructions
+          sparse-checkout: .github/skills/native-cosmos-branching/SKILL.md
+          sparse-checkout-cone-mode: false
+          token: ${{ secrets.LIBRARY_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Ask Copilot to plan the consumer integration
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p consumer/.github/skills
+          cp -R instructions/.github/skills/native-cosmos-branching consumer/.github/skills/
+          docker build -t skill-consumer-cli - <<'EOF'
+          FROM node:22-bookworm-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git && npm install -g @github/copilot@1.0.115
+          USER node
+          WORKDIR /consumer
+          ENTRYPOINT ["copilot"]
+          EOF
+          docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --memory=2g \
+            -e GITHUB_TOKEN -e GITHUB_ACTIONS -e GITHUB_REPOSITORY \
+            -v "$PWD/consumer:/consumer:ro" skill-consumer-cli -s --no-ask-user --allow-tool=read \
+            -p 'Read the installed native-cosmos-branching skill in .github/skills. Act as the coordinator in an empty Python consumer on a hosted Linux runner. Output only JSON with repository (owner/repo), revision (tested full git SHA), pythonpath (repository-relative module search directory), module and class (Python import), and steps (array of arrays). Seed the base, fork two siblings a and b, write a, prove b still sees the seed while a is running, then stop both. Use these primitives only: ["start"|"stop"|"seal", generation], ["fork", parent, child], ["seed"|"edit"|"check", generation]. seed and edit perform and verify a write, check verifies an inherited seed. Use the exact lowercase names base, a, b. The installer and executor will run your plan; no shell commands or credentials.' >"$RUNNER_TEMP/proposal"
+      - name: Validate installation request before using a credential
+        id: install
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os,pathlib,re
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          text=(root/'proposal').read_text().strip()
+          fence=re.fullmatch(r'```(?:json)?\s*(.*?)\s*```',text,re.S)
+          p=json.loads(fence[1] if fence else text)
+          assert p['repository']=='TheovanKraay/cosmos-agent-swarm'
+          assert p['revision']=='0a64d54076b930b5200b8708047637b7f2529ae4'
+          assert (p['pythonpath'],p['module'],p['class'])==('backends/filesystem/appliance','client','Session')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              for k in ('repository','revision','pythonpath'):
+                  print(f'{k}={p[k]}',file=out)
+          (root/'plan.json').write_text(json.dumps(p))
+          PY
+      - name: Obtain the runtime requested by the consumer
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ steps.install.outputs.repository }}
+          ref: ${{ steps.install.outputs.revision }}
+          path: runtime
+          token: ${{ secrets.LIBRARY_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Exercise the proposed lifecycle with real SDK reads and writes
+        working-directory: consumer
+        shell: bash
+        env:
+          MODULE_DIR: ${{ steps.install.outputs.pythonpath }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/runtime/$MODULE_DIR"
+          test "$(git -C ../runtime rev-parse HEAD)" = "${{ steps.install.outputs.revision }}"
+          python -m venv "$RUNNER_TEMP/sdk"
+          "$RUNNER_TEMP/sdk/bin/pip" install azure-cosmos==4.17.1
+          trap 'docker compose -f "$PYTHONPATH/compose.yaml" down -v' EXIT
+          "$RUNNER_TEMP/sdk/bin/python" - <<'PY'
+          import importlib,json,os,pathlib,re
+          from collections import Counter
+          from azure.cosmos import CosmosClient,PartitionKey
+          p=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'plan.json').read_text())
+          mod=importlib.import_module(p['module'])
+          assert pathlib.Path(mod.__file__).resolve().parent==pathlib.Path(os.environ['PYTHONPATH'])
+          expected=[('start','base'),('seed','base'),('stop','base'),('seal','base'),
+                    ('fork','base','a'),('fork','base','b'),('start','a'),('start','b'),
+                    ('edit','a'),('check','b'),('stop','a'),('stop','b')]
+          steps=list(map(tuple,p['steps']))
+          assert Counter(steps)==Counter(expected) and steps.index(('edit','a'))<steps.index(('check','b'))<steps.index(('stop','a'))
+          key=re.search(r'const EMULATOR_KEY: &str =\s*"([^"]+)"',pathlib.Path('../runtime/src/local.rs').read_text())[1]
+          with getattr(mod,p['class'])() as s:
+              g={'base':s.base}; urls={}
+              for op,name,*args in steps:
+                  if op=='fork':
+                      g[args[0]]=s.call(op,g[name])
+                  elif op=='start':
+                      urls[name]=s.call(op,g[name])
+                  elif op in ('seal','stop'):
+                      s.call(op,g[name])
+                      urls.pop(name,None)
+                  else:
+                      with CosmosClient(urls[name],credential=key,enable_endpoint_discovery=False,retry_write=0) as client:
+                          if op=='seed':
+                              c=client.create_database('demo').create_container('orders',PartitionKey(path='/id'))
+                              c.create_item({'id':'order','value':'seed'})
+                          else:
+                              c=client.get_database_client('demo').get_container_client('orders')
+                          assert c.read_item('order',partition_key='order')['value']=='seed'
+                          if op=='edit':
+                              c.replace_item('order',{'id':'order','value':'a'})
+                              assert c.read_item('order',partition_key='order')['value']=='a'
+          PY
+          echo 'Passed: Copilot derived the runtime revision, Python import and sibling plan from the installed skill; downstream checkout, SDK isolation and session cleanup verified.' >> "$GITHUB_STEP_SUMMARY"
