@@ -1,5 +1,11 @@
 name: Paired pricing agents on the development fork
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      compare:
+        description: Run matched fresh/native two-worker trials, then four-worker trials (16 CLI invocations)
+        type: boolean
+        default: false
 permissions:
   copilot-requests: write
 jobs:
@@ -11,9 +17,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-branching
-          ref: 475aafb098eb8ccc5e1676f1f1cc41ec7877aa49
+          ref: 6970a5baa2d6df3fe90588fc0b48e8248263234f
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
+      - name: Gate comparison on logical review and verified volume teardown
+        if: inputs.compare
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: bash tools/review-trial.sh
       - name: Prepare isolated tool and agent processes
         run: |
           docker context create desktop-linux --docker host=unix:///var/run/docker.sock
@@ -28,6 +39,7 @@ jobs:
           ENTRYPOINT ["copilot"]
           EOF
       - name: Verify concurrent workers and inherited follow-up
+        if: ${{ !inputs.compare }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -40,3 +52,36 @@ jobs:
             exit 1
           fi
           grep -Fx 'Verified three agent tool sessions: base 100, discount 90, delivery 105, coupon 83; inherited code, Git ancestry, sealed ancestors and cleanup passed.' "$RUNNER_TEMP/trial.out" >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare verified task waves on dedicated XFS storage
+        if: inputs.compare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          command -v mkfs.xfs || { sudo apt-get update -qq && sudo apt-get install -y xfsprogs; }
+          img=$(mktemp "$RUNNER_TEMP/layout-XXXXXX.img")
+          export LAYOUT_XFS=$(mktemp -d "$RUNNER_TEMP/layout-XXXXXX")
+          truncate -s 8G "$img"
+          mkfs.xfs -m reflink=1 "$img"
+          sudo mount -o loop "$img" "$LAYOUT_XFS"
+          trap 'sudo umount "$LAYOUT_XFS"' EXIT
+          sudo chown "$USER" "$LAYOUT_XFS"
+          M2_SDK_KEY=$(python -c 'import pathlib,re; print(re.search(r"const EMULATOR_KEY: &str =\s*\"([^\"]+)\"", pathlib.Path("src/local.rs").read_text())[1])')
+          echo "::add-mask::$M2_SDK_KEY"
+          export M2_SDK_KEY
+          rc=0
+          "$RUNNER_TEMP/sdk/bin/python" -I -B backends/filesystem/overlay/agent_compare.py >"$RUNNER_TEMP/rows" 2>"$RUNNER_TEMP/err" || rc=$?
+          python - "$RUNNER_TEMP/rows" "$rc" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json,sys
+          rows=list(map(json.loads,open(sys.argv[1])))
+          print("|Concurrent agents|Backend|Setup s|Agent wall s|Verification and stop s|Verified total s|Retained MiB|Peak host MiB|CLI overlap s|")
+          print("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+          for r in rows:
+              assert r['backend'] in ('fresh','overlay','reflink') and r['overlap_s']>0
+              print("|{width}|{backend}|{setup_s}|{agent_s}|{verify_stop_s}|{verified_s}|{retained_mib}|{host_peak_mib}|{overlap_s}|".format(**r))
+          if sys.argv[2]=='0':
+              assert [(r['width'],r['layout']) for r in rows]==[(2,'fresh'),(2,'native'),(4,'native'),(4,'fresh')]
+          PY
+          if ((rc)); then
+            grep -oE '^([A-Za-z]+Error|[A-Za-z]+Exception):|line [0-9]+, in [a-zA-Z_]+' "$RUNNER_TEMP/err" | tail -8 || :
+            exit "$rc"
+          fi
