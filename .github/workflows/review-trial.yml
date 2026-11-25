@@ -1,0 +1,26 @@
+name: Logical single-item review
+on: workflow_dispatch
+permissions: {}
+jobs:
+  review:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TheovanKraay/cosmos-agent-branching
+          ref: 2e184cf381657ee05dbb8cb72b14f0d0b3ce065b
+          token: ${{ secrets.LIBRARY_READ_TOKEN }}
+          persist-credentials: false
+      - name: Check reviewed and stale decisions on the emulator
+        run: |
+          cid=$(docker run -d -p 127.0.0.1:18080:8080 -p 127.0.0.1:18081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406 --protocol http --enable-explorer false --enable-telemetry false)
+          trap 'docker rm -fv "$cid" >/dev/null' EXIT
+          curl -fsS --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/ready >/dev/null
+          if ! cargo +stable test --locked --test recursive_comparison_live single_item_review_rejects_stale_approval -- --exact >"$RUNNER_TEMP/review.log" 2>&1; then
+            grep -oE '^error(\[E[0-9]+\])?|panicked at [^ :]+:[0-9]+|WriteOutcomeUnknown' "$RUNNER_TEMP/review.log" | tail -8
+            exit 1
+          fi
+          grep -q '^test single_item_review_rejects_stale_approval ... ok$' "$RUNNER_TEMP/review.log"
+          echo 'Verified: read-only conflict review, stale approval rejected, newer target preserved, fresh single-item approval applied.' >> "$GITHUB_STEP_SUMMARY"
