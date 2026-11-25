@@ -10,19 +10,32 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TheovanKraay/cosmos-agent-branching
-          ref: 8ca59c6be9f9b94e74ada8b742bc8840880f37e7
+          ref: c9431020bd08879ea07338e7ace770c993b166d2
           token: ${{ secrets.LIBRARY_READ_TOKEN }}
           persist-credentials: false
       - name: Check reviewed and stale decisions on the emulator
         run: |
-          cid=$(docker run -d -p 127.0.0.1:18080:8080 -p 127.0.0.1:18081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406 --protocol http --enable-explorer false --enable-telemetry false)
-          trap 'docker rm -fv "$cid" >/dev/null' EXIT
+          owner=$(cat /proc/sys/kernel/random/uuid)
+          vol=$(docker volume create --label "trial=$owner" "review-$owner")
+          cid=$(docker run -d --label "trial=$owner" --mount "type=volume,src=$vol,dst=/data" -p 127.0.0.1:18080:8080 -p 127.0.0.1:18081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406 --data-path /data --protocol http --enable-explorer false --enable-telemetry false)
+          cleanup() {
+            test "$(docker inspect -f '{{index .Config.Labels "trial"}}' "$cid")" = "$owner"
+            test "$(docker volume inspect -f '{{index .Labels "trial"}}' "$vol")" = "$owner"
+            docker rm -fv "$cid" >/dev/null
+            docker volume rm "$vol" >/dev/null
+            containers=$(docker ps -aq --filter "label=trial=$owner")
+            volumes=$(docker volume ls -q --filter "label=trial=$owner")
+            test -z "$containers$volumes"
+            echo 'Verified disposal of the owned emulator container and data volume.' >> "$GITHUB_STEP_SUMMARY"
+          }
+          trap cleanup EXIT
+          export REVIEW_OWNED_VOLUME=1
           curl -fsS --retry 60 --retry-delay 1 --retry-all-errors http://127.0.0.1:18080/ready >/dev/null
           if ! cargo +stable test --locked --test recursive_comparison_live single_item_review_rejects_stale_approval -- --exact --nocapture >"$RUNNER_TEMP/review.log" 2>&1; then
             grep -oE '^error(\[E[0-9]+\])?|panicked at [^ :]+:[0-9]+|WriteOutcomeUnknown|review assertions passed|cleanup delete=(confirmed|http-[0-9]+) read=(absent|same-rid|different-rid|http-[0-9]+)|Service \{ status: [0-9]+ \}' "$RUNNER_TEMP/review.log" | tail -12
             exit 1
           fi
           grep -Fx 'review assertions passed' "$RUNNER_TEMP/review.log" >> "$GITHUB_STEP_SUMMARY"
-          grep -Ex 'cleanup delete=(confirmed|http-[0-9]+) read=absent' "$RUNNER_TEMP/review.log" >> "$GITHUB_STEP_SUMMARY"
+          grep -Fx 'fixture retained for runner-owned volume teardown' "$RUNNER_TEMP/review.log"
           grep -q '^test single_item_review_rejects_stale_approval ... ok$' "$RUNNER_TEMP/review.log"
           echo 'Verified: read-only conflict review, stale approval rejected, newer target preserved, fresh single-item approval applied.' >> "$GITHUB_STEP_SUMMARY"
